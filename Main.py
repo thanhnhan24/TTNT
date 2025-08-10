@@ -2,7 +2,7 @@ import UI
 from PySide2.QtWidgets import QApplication, QMainWindow
 from PySide2.QtCore import QThread, Signal, Qt, QTimer
 from PySide2.QtGui import QImage, QPixmap
-import sys, os, queue, threading, time
+import sys, os, queue, threading, time, cv2, math
 import pyrealsense2 as rs
 import numpy as np
 from xarm.wrapper import XArmAPI
@@ -12,8 +12,10 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 # =========================
 # Camera thread (RealSense)
 # =========================
+
 class CameraThread(QThread):
-    frame_signal = Signal(QImage)
+    # Truyền ndarray BGR ra ngoài để main xử lý/YOLO
+    frame_signal = Signal(object)  # emits: np.ndarray (HxWx3, uint8 BGR)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,26 +33,39 @@ class CameraThread(QThread):
             self._pipeline = rs.pipeline()
             cfg = rs.config()
             cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            self._pipeline.start(cfg)
+            profile = self._pipeline.start(cfg)
+
+            # === LẤY INTRINSICS MÀU, EMIT 1 LẦN ===
+            try:
+                cprof = rs.video_stream_profile(profile.get_stream(rs.stream.color))
+                intr = cprof.get_intrinsics()
+                # K, dist theo OpenCV
+                K = np.array([[intr.fx, 0, intr.ppx],
+                              [0, intr.fy, intr.ppy],
+                              [0,       0,        1]], dtype=np.float32)
+                dist = np.array(intr.coeffs, dtype=np.float32)
+                self.intrinsics_signal.emit({"K": K, "dist": dist})
+            except Exception as e:
+                self._log(f"[CameraThread] intrinsics error: {e}")
+
             while not self.isInterruptionRequested():
-                frames = self._pipeline.wait_for_frames()
+                frames = self._pipeline.wait_for_frames(5000)
                 color = frames.get_color_frame()
                 if not color:
                     continue
                 bgr = np.asanyarray(color.get_data())
-                rgb = bgr[:, :, ::-1].copy()
-                h, w, ch = rgb.shape
-                qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-                self.frame_signal.emit(qimg)
+                self.frame_signal.emit(bgr)
+
         except Exception as e:
             self._log(f"[CameraThread] {e}")
         finally:
             try:
                 if self._pipeline:
                     self._pipeline.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                self._log(f"[CameraThread] stop error: {e}")
             self._pipeline = None
+
 
 # =========================
 # xArm connect worker (không block UI)
@@ -219,7 +234,8 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.ui = UI.Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowTitle("XArm Control (Camera + Robot)")
-
+        # trong __init__ của MainApp
+        self.detect_counts = {}
         # trạng thái chung
         self.stop_event = threading.Event()
         self._arm = None
@@ -227,7 +243,9 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
 
         # logging
         self.log_signal.connect(self.print_to_listview)
-
+        self.cam_K = None        # camera matrix 3x3 (numpy)
+        self.cam_dist = None     # distortion (numpy)
+        self.aruco_size_m = 0.035  # kích thước cạnh tag (m) – chỉnh theo tag thực tế
         # Robot threads
         self.robot_ctrl = RobotControlThread(arm=None, lock=self.arm_lock, app=self)
         self.robot_ctrl.log_sig.connect(self.log)
@@ -237,9 +255,13 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.robot_mon.update_sig.connect(self._on_robot_pose)
         self.robot_mon.log_sig.connect(self.log)
         self.robot_mon.start()
+        self.camera_thread.frame_signal.connect(self._on_frame)
+        self.camera_thread.intrinsics_signal.connect(self._on_intrinsics)
 
         # Camera thread (khởi động sau khi UI lên)
         self.camera_thread = None
+        self.yolo_model = None
+        self.yolo_names = None
         QTimer.singleShot(0, self.start_camera)
 
         # Gán nút theo tên mới
@@ -251,7 +273,6 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.ui.palletView.clicked.connect(self.move_to_pallet)
         if hasattr(self.ui, "clearErrorbutton"):
             self.ui.clearErrorbutton.clicked.connect(self.clear_error)
-
 
     # ===== log helpers =====
     def log(self, msg: str):
@@ -298,13 +319,58 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.camera_thread.wait()
             self.log("Camera stopped.")
 
-    def _on_frame(self, qimg: QImage):
-        if hasattr(self.ui, "imgOut") and self.ui.imgOut is not None:
-            pix = QPixmap.fromImage(qimg).scaled(self.ui.imgOut.width(),
-                                                 self.ui.imgOut.height(),
-                                                 Qt.KeepAspectRatio,
-                                                 Qt.SmoothTransformation)
-            self.ui.imgOut.setPixmap(pix)
+    def _on_frame(self, bgr: np.ndarray):
+        """Nhận frame BGR từ CameraThread. Nếu đã load YOLO -> chạy detect rồi hiển thị."""
+        if bgr is None or bgr.size == 0 or not hasattr(self.ui, "imgOut"):
+            return
+
+        vis_bgr = bgr
+        count_box = None  # sẽ cập nhật cho UI
+
+        if self.yolo_model is not None:
+            try:
+                rgb = bgr[:, :, ::-1]
+                results = self.yolo_model.predict(rgb, verbose=False, imgsz=640, conf=0.65, iou=0.01, device=0)
+                if results:
+                    r = results[0]
+                    # --- ĐẾM SỐ LƯỢNG THEO CLASS ---
+                    names = getattr(r, "names", None) or getattr(self.yolo_model, "names", {})
+                    cls = None
+                    if hasattr(r, "boxes") and hasattr(r.boxes, "cls") and r.boxes.cls is not None:
+                        cls = r.boxes.cls.detach().cpu().numpy().astype(int)
+                    counts = {}
+                    if cls is not None and len(cls) > 0:
+                        for cid in cls:
+                            name = names[cid] if isinstance(names, (list, tuple)) else names.get(int(cid), str(cid))
+                            counts[name] = counts.get(name, 0) + 1
+                    self.detect_counts = counts
+                    count_box = counts.get("box", 0)
+                    # vẫn trong _on_frame, sau khi tính count_box
+                    if count_box is not None and hasattr(self.ui, "packageAvailable"):
+                        w = self.ui.packageAvailable
+                        text = str(count_box)
+                        if hasattr(w, "setPlainText"):
+                            w.setPlainText(text)
+                        elif hasattr(w, "setText"):
+                            w.setText(text)
+
+                    # vẽ ảnh đã detect
+                    if hasattr(r, "plot"):
+                        vis_bgr = r.plot()  # BGR uint8
+
+            except Exception as e:
+                self.log(f"YOLO infer error: {e}")
+                vis_bgr = bgr
+
+        # Convert BGR -> RGB -> QImage -> QPixmap và show
+        rgb = vis_bgr[:, :, ::-1].copy()
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(self.ui.imgOut.width(),
+                                            self.ui.imgOut.height(),
+                                            Qt.KeepAspectRatio,
+                                            Qt.SmoothTransformation)
+        self.ui.imgOut.setPixmap(pix)
 
     # ===== xArm =====
     def connect_hardware(self):
@@ -320,6 +386,7 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.robot_ctrl.arm = self._arm
         self.robot_mon.arm = self._arm
         self.log("xArm sẵn sàng.")
+        self.choose_and_load_yolo()
 
     def go_home(self):
         self.robot_ctrl.go_home()
@@ -403,6 +470,34 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         except Exception as e:
             self.log(f"Lỗi khi clear error: {e}")
 
+    def choose_and_load_yolo(self):
+        """Mở hộp thoại chọn .pt và load YOLOv8. Trả về True nếu OK."""
+        try:
+            from PySide2.QtWidgets import QFileDialog
+            p, _ = QFileDialog.getOpenFileName(self, "Chọn model YOLOv8 (.pt)",
+                                            "", "YOLOv8 weights (*.pt)")
+            if not p:
+                self.log("Bỏ qua: chưa chọn model YOLO.")
+                return False
+            try:
+                from ultralytics import YOLO
+            except Exception as e:
+                self.log(f"Chưa cài ultralytics: {e}. pip install ultralytics"); return False
+
+            t0 = time.time()
+            self.ui.yoloPath.setPlainText(p)
+            self.yolo_model = YOLO(p)
+            # Lấy tên lớp nếu có
+            try:
+                self.yolo_names = self.yolo_model.names
+            except Exception:
+                self.yolo_names = None
+            self.log(f"Đã load YOLOv8: {os.path.basename(p)} ({time.time()-t0:.2f}s)")
+            self.move_to_pallet()
+            return True
+        except Exception as e:
+            self.log(f"Lỗi load YOLO: {e}")
+            return False
 
     # ===== lifecycle =====
     def closeEvent(self, event):

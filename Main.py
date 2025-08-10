@@ -257,6 +257,8 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.robot_mon.log_sig.connect(self.log)
         self.robot_mon.start()
         self.camera_thread = None
+        self._last_aruco = None
+
 
         # Kết nối xArm
         self.connect_hardware() 
@@ -276,6 +278,12 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.ui.palletView.clicked.connect(self.move_to_pallet)
         if hasattr(self.ui, "clearErrorbutton"):
             self.ui.clearErrorbutton.clicked.connect(self.clear_error)
+        if hasattr(self.ui, "checkPickupPos"):
+            self.ui.checkPickupPos.clicked.connect(self.check_pickup_pos)
+        if hasattr(self.ui, "calibButton"):
+            self.ui.calibButton.clicked.connect(self.calib_aruco_center)
+
+
 
     # ===== log helpers =====
     def log(self, msg: str):
@@ -325,6 +333,7 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.log("Camera stopped.")
 
     def _on_frame(self, bgr):
+        yaw_offsets = 90
         try:
             vis_bgr = bgr.copy()
 
@@ -361,9 +370,15 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
 
                     # Góc 2D trên ảnh
                     pts = corners[idx][0]
+                    cx = float(pts[:,0].mean()); cy = float(pts[:,1].mean())
+                    self._last_aruco = {
+                        "u": cx, "v": cy,
+                        "img_wh": (bgr.shape[1], bgr.shape[0]),
+                        "t": time.time()
+                    }
                     tl, tr = pts[0], pts[1]
                     v = tr - tl
-                    yaw_img_deg = math.degrees(math.atan2(v[1], v[0]))
+                    yaw_img_deg = float(math.degrees(math.atan2(v[1], v[0]))) + yaw_offsets 
                     self._set_text_safe("pickUpYaw", f"{yaw_img_deg:.2f}")
 
                     if hasattr(self, "cam_K") and hasattr(self, "cam_dist") and hasattr(self, "aruco_size_m"):
@@ -373,15 +388,25 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
                             )
                             rvec, tvec = rvecs[idx].reshape(3, 1), tvecs[idx].reshape(3, 1)
 
-                            cv2.aruco.drawAxis(vis_bgr, self.cam_K, self.cam_dist, rvec, tvec, self.aruco_size_m * 0.5)
+                            # cv2.aruco.drawAxis(vis_bgr, self.cam_K, self.cam_dist, rvec, tvec, self.aruco_size_m * 0.5)
 
                             X_mm = float(tvec[0] * 1000.0)
                             Y_mm = float(tvec[1] * 1000.0)
                             Z_mm = float(tvec[2] * 1000.0)
 
-                            self._set_text_safe("pickUpX", f"{X_mm:.1f}")
-                            self._set_text_safe("pickUpY", f"{Y_mm:.1f}")
-                            self._set_text_safe("pickUpZ", f"{Z_mm:.1f}")
+                            # Sau khi lấy X_mm, Y_mm, Z_mm từ tvec
+                            robot_X = getattr(self, "_current_x", 0.0)
+                            robot_Y = getattr(self, "_current_y", 0.0)
+                            cam_offset_x = self._get_float_from_plain("cameraXoffsets") or 0.0
+                            cam_offset_y = self._get_float_from_plain("cameraYoffsets") or 0.0
+
+                            pickUpX_val = robot_X - X_mm + cam_offset_x
+                            pickUpY_val = robot_Y + Y_mm + cam_offset_y
+
+                            self._set_text_safe("pickUpX", f"{pickUpX_val:.1f}")
+                            self._set_text_safe("pickUpY", f"{pickUpY_val:.1f}")
+                            # self._set_text_safe("pickUpZ", f"{Z_mm:.1f}")
+
                     else:
                         # Nếu chưa có intrinsics thì fill toạ độ ảnh
                         cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
@@ -495,6 +520,8 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.ui.xarm_theta.setPlainText(f"{yaw:.2f}"); updated = True
         if not updated:
             self.log(f"Pose: x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}")
+        self._current_x = float(x)
+        self._current_y = float(y)
 
     def move_to_pallet(self):
         # Đọc X/Y/Z từ self.ui.palletX, palletY, palletZ
@@ -512,7 +539,7 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             return
 
         # Dùng yaw hiện tại nếu có, mặc định 0.0
-        yaw = getattr(self, "_current_yaw", 0.0)
+        yaw = 0
         self.log(f"Đi tới pallet: x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}")
         self.robot_ctrl.move(x, y, z, yaw)
 
@@ -562,6 +589,110 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.cam_K = data.get("K")
         self.cam_dist = data.get("dist")
         self.log(f"Got intrinsics: fx={self.cam_K[0,0]:.1f}, fy={self.cam_K[1,1]:.1f}")
+
+    def check_pickup_pos(self):
+        # Lấy X, Y, Yaw từ các ô đã điền (ArUco tính được trước đó)
+        x   = self._get_float_from_plain("pickUpX")
+        y   = self._get_float_from_plain("pickUpY")
+        yaw = self._get_float_from_plain("pickUpYaw")
+
+        if x is None or y is None:
+            self.log("Thiếu pickUpX/pickUpY. Kiểm tra lại ArUco hoặc các ô nhập.")
+            return
+        if yaw is None:
+            yaw = getattr(self, "_current_yaw", 0.0)  # fallback: yaw hiện tại của xArm
+
+        z = 175.0  # theo yêu cầu cố định Z
+
+        # Log cho rõ + hiển thị vào cụm 'Tọa độ gắp' nếu có
+        self.log(f"Đi tới tọa độ gắp: x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}, speed={getattr(self.ui,'speed',None).value() if hasattr(self.ui,'speed') else 'UI'}")
+        for name, val in (("grabX", x), ("grabY", y), ("grabZ", z), ("grabYaw", yaw)):
+            if hasattr(self.ui, name):
+                w = getattr(self.ui, name)
+                if hasattr(w, "setPlainText"): w.setPlainText(f"{val:.2f}")
+                elif hasattr(w, "setText"):    w.setText(f"{val:.2f}")
+
+        # Gửi lệnh cho thread robot (thread sẽ tự lấy speed từ self.ui.speed)
+        self.robot_ctrl.move(x, y, z, yaw)
+
+    def calib_aruco_center(self):
+        """
+        Đưa tâm ArUco về trùng tâm ảnh bằng visual-servo trên X,Y.
+        Dựa trên intrinsics (fx, fy) và cao độ hover_z.
+        """
+        if self._arm is None:
+            self.log("Chưa kết nối xArm."); return
+        if self._last_aruco is None or time.time() - self._last_aruco.get("t", 0) > 1.0:
+            self.log("Không thấy ArUco gần đây. Đưa tag vào khung hình."); return
+
+        # --- tham số điều khiển ---
+        hover_z   = 220.0      # cao độ căn XY (mm) – chỉnh theo thực tế
+        px_th     = 3.0        # ngưỡng lỗi ảnh (px) để coi là trùng
+        kP        = 0.7        # hệ số tỉ lệ (giảm nếu rung)
+        max_step  = 15.0       # mm: giới hạn mỗi bước
+        max_iter  = 15
+        # nếu thấy đi ngược, đổi dấu ở đây:
+        sign_x, sign_y = +1.0, +1.0
+
+        # pose hiện tại
+        with self.arm_lock:
+            ret = self._arm.get_position(is_radian=False)
+        if not ret or ret[0] != 0:
+            self.log("Không đọc được pose xArm."); return
+        cur_x, cur_y, cur_z, _, _, cur_yaw = ret[1]
+
+        # lên/ xuống độ cao hover_z
+        if abs(cur_z - hover_z) > 1.0:
+            self.robot_ctrl.move(cur_x, cur_y, hover_z, cur_yaw)
+
+        for it in range(max_iter):
+            data = self._last_aruco
+            if data is None or time.time() - data.get("t", 0) > 1.0:
+                self.log("Mất ArUco trong lúc căn."); break
+
+            u, v = float(data["u"]), float(data["v"])
+            img_w, img_h = data.get("img_wh", (640, 480))
+            u0, v0 = img_w * 0.5, img_h * 0.5
+
+            ex = u - u0   # + nếu tag ở bên phải tâm ảnh
+            ey = v - v0   # + nếu tag ở bên dưới tâm ảnh
+
+            if abs(ex) <= px_th and abs(ey) <= px_th:
+                self.log(f"Calib XY xong trong {it} bước (|e|≤{px_th}px).")
+                break
+
+            # map px -> mm tại cao độ hover_z (mô hình pinhole)
+            if self.cam_K is not None:
+                fx = float(self.cam_K[0,0]); fy = float(self.cam_K[1,1])
+                sx_m_per_px = (hover_z/1000.0) / max(fx, 1e-6)  # m/px
+                sy_m_per_px = (hover_z/1000.0) / max(fy, 1e-6)
+                dx_mm = -ex * sx_m_per_px * 1000.0 * kP
+                dy_mm = -ey * sy_m_per_px * 1000.0 * kP
+            else:
+                # fallback nếu chưa có intrinsics: tỉ lệ gần đúng
+                scale = 0.2  # mm/px – chỉnh thực nghiệm
+                dx_mm = -ex * scale * kP
+                dy_mm = -ey * scale * kP
+
+            # giới hạn bước & đổi dấu theo hướng trục robot
+            dx_mm = float(np.clip(dx_mm, -max_step, max_step)) * sign_x
+            dy_mm = float(np.clip(dy_mm, -max_step, max_step)) * sign_y
+
+            target_x = cur_x + dx_mm
+            target_y = cur_y + dy_mm
+
+            self.log(f"[Calib] it={it} err=({ex:.1f}px,{ey:.1f}px) step=({dx_mm:.1f},{dy_mm:.1f}) → ({target_x:.1f},{target_y:.1f})")
+            self.robot_ctrl.move(target_x, target_y, hover_z, cur_yaw)
+
+            # cập nhật pose hiện tại sau khi move
+            with self.arm_lock:
+                ret = self._arm.get_position(is_radian=False)
+            if not ret or ret[0] != 0: break
+            cur_x, cur_y, cur_z, _, _, cur_yaw = ret[1]
+
+        # (tuỳ chọn) sau khi căn xong thì hạ xuống Z=175
+        # self.robot_ctrl.move(cur_x, cur_y, 175.0, cur_yaw)
+
 
     # ===== lifecycle =====
     def closeEvent(self, event):

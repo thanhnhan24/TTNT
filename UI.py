@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 ################################################################################
-## Form generated from reading UI file 'ttntmeZpqY.ui'
+## Form generated from reading UI file 'ttntMdPtIf.ui'
 ##
 ## Created by: Qt User Interface Compiler version 5.15.2
 ##
@@ -11,7 +11,7 @@
 from PySide2.QtCore import *
 from PySide2.QtGui import *
 from PySide2.QtWidgets import *
-import sys
+import sys 
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
@@ -81,7 +81,7 @@ class Ui_MainWindow(object):
         self.imgOut.setGeometry(QRect(10, 30, 821, 401))
         self.logView = QListWidget(self.centralwidget)
         self.logView.setObjectName(u"logView")
-        self.logView.setGeometry(QRect(20, 250, 641, 221))
+        self.logView.setGeometry(QRect(40, 290, 621, 191))
         self.groupBox_3 = QGroupBox(self.centralwidget)
         self.groupBox_3.setObjectName(u"groupBox_3")
         self.groupBox_3.setGeometry(QRect(20, 480, 641, 351))
@@ -377,6 +377,46 @@ class Ui_MainWindow(object):
         self.splitter_15.setObjectName(u"splitter_15")
         self.splitter_15.setGeometry(QRect(0, 0, 0, 0))
         self.splitter_15.setOrientation(Qt.Vertical)
+        self.groupBox_8 = QGroupBox(self.centralwidget)
+        self.groupBox_8.setObjectName(u"groupBox_8")
+        self.groupBox_8.setGeometry(QRect(680, 770, 422, 71))
+        self.groupBox_8.setFont(font3)
+        self.splitter_17 = QSplitter(self.groupBox_8)
+        self.splitter_17.setObjectName(u"splitter_17")
+        self.splitter_17.setGeometry(QRect(10, 30, 401, 31))
+        self.splitter_17.setOrientation(Qt.Horizontal)
+        self.label_31 = QLabel(self.splitter_17)
+        self.label_31.setObjectName(u"label_31")
+        self.label_31.setFont(font4)
+        self.splitter_17.addWidget(self.label_31)
+        self.xarm_X = QPlainTextEdit(self.splitter_17)
+        self.xarm_X.setObjectName(u"xarm_X")
+        self.xarm_X.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.splitter_17.addWidget(self.xarm_X)
+        self.label_32 = QLabel(self.splitter_17)
+        self.label_32.setObjectName(u"label_32")
+        self.label_32.setFont(font4)
+        self.splitter_17.addWidget(self.label_32)
+        self.xarm_Y = QPlainTextEdit(self.splitter_17)
+        self.xarm_Y.setObjectName(u"xarm_Y")
+        self.xarm_Y.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.splitter_17.addWidget(self.xarm_Y)
+        self.label_33 = QLabel(self.splitter_17)
+        self.label_33.setObjectName(u"label_33")
+        self.label_33.setFont(font4)
+        self.splitter_17.addWidget(self.label_33)
+        self.xarm_Z = QPlainTextEdit(self.splitter_17)
+        self.xarm_Z.setObjectName(u"xarm_Z")
+        self.xarm_Z.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.splitter_17.addWidget(self.xarm_Z)
+        self.label_34 = QLabel(self.splitter_17)
+        self.label_34.setObjectName(u"label_34")
+        self.label_34.setFont(font4)
+        self.splitter_17.addWidget(self.label_34)
+        self.xarm_theta = QPlainTextEdit(self.splitter_17)
+        self.xarm_theta.setObjectName(u"xarm_theta")
+        self.xarm_theta.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.splitter_17.addWidget(self.xarm_theta)
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
@@ -451,6 +491,16 @@ class Ui_MainWindow(object):
         self.label_14.setText(QCoreApplication.translate("MainWindow", u"Z:", None))
         self.label_22.setText(QCoreApplication.translate("MainWindow", u"Yaw:", None))
         self.pickUpYaw.setPlainText(QCoreApplication.translate("MainWindow", u"0", None))
+        self.groupBox_8.setTitle(QCoreApplication.translate("MainWindow", u"T\u1ecda \u0111\u1ed9 hi\u1ec7n t\u1ea1i", None))
+        self.label_31.setText(QCoreApplication.translate("MainWindow", u"X:", None))
+        self.label_32.setText(QCoreApplication.translate("MainWindow", u"Y:", None))
+        self.label_33.setText(QCoreApplication.translate("MainWindow", u"Z:", None))
+        self.label_34.setText(QCoreApplication.translate("MainWindow", u"Yaw:", None))
+        self.xarm_theta.setPlainText(QCoreApplication.translate("MainWindow", u"0", None))
+
+        self.palletX.setPlainText("169.7")
+        self.palletY.setPlainText("168.5")
+        self.palletZ.setPlainText("344.2")
     # retranslateUi
 
 

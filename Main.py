@@ -118,7 +118,7 @@ class RobotControlThread(QThread):
             if hasattr(self.app, "ui") and hasattr(self.app.ui, "speed"):
                 spd = float(self.app.ui.speed.value())
                 if spd <= 0:
-                    spd = 1.0
+                    spd = 39 # default
         except Exception:
             spd = None  # để SDK dùng mặc định nếu đọc lỗi
 
@@ -155,6 +155,8 @@ class RobotControlThread(QThread):
         except Exception:
             spd = None
 
+        if spd <= 0:
+            spd = 39 # default
         with self.lock:
             # move_gohome có thể nhận speed (tuỳ bản SDK). Nếu không hỗ trợ, bỏ tham số đi.
             try:
@@ -247,6 +249,9 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.ui.zeroPos.clicked.connect(self.go_home)
         if hasattr(self.ui, "palletView"):
             self.ui.palletView.clicked.connect(self.move_to_pallet)
+        if hasattr(self.ui, "clearErrorbutton"):
+            self.ui.clearErrorbutton.clicked.connect(self.clear_error)
+
 
     # ===== log helpers =====
     def log(self, msg: str):
@@ -384,6 +389,20 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         yaw = getattr(self, "_current_yaw", 0.0)
         self.log(f"Đi tới pallet: x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}")
         self.robot_ctrl.move(x, y, z, yaw)
+
+    def clear_error(self):
+        if self._arm is None:
+            self.log("Chưa kết nối xArm.")
+            return
+        try:
+            with self.arm_lock:
+                self._arm.clean_error()
+                self._arm.clean_warn()
+                self._arm.set_state(0)  # đưa về trạng thái sẵn sàng
+            self.log("Đã gửi lệnh Clear Error cho xArm, robot sẵn sàng.")
+        except Exception as e:
+            self.log(f"Lỗi khi clear error: {e}")
+
 
     # ===== lifecycle =====
     def closeEvent(self, event):

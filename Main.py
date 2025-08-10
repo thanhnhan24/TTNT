@@ -6,6 +6,7 @@ import sys, os, queue, threading, time, cv2, math
 import pyrealsense2 as rs
 import numpy as np
 from xarm.wrapper import XArmAPI
+from cv2 import aruco
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
@@ -15,8 +16,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
 class CameraThread(QThread):
     # Truyền ndarray BGR ra ngoài để main xử lý/YOLO
-    frame_signal = Signal(object)  # emits: np.ndarray (HxWx3, uint8 BGR)
-
+    frame_signal = Signal(object)        # ndarray BGR
+    intrinsics_signal = Signal(object)   # {"K": K, "dist": dist}
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pipeline = None
@@ -255,8 +256,10 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.robot_mon.update_sig.connect(self._on_robot_pose)
         self.robot_mon.log_sig.connect(self.log)
         self.robot_mon.start()
-        self.camera_thread.frame_signal.connect(self._on_frame)
-        self.camera_thread.intrinsics_signal.connect(self._on_intrinsics)
+        self.camera_thread = None
+
+        # Kết nối xArm
+        self.connect_hardware() 
 
         # Camera thread (khởi động sau khi UI lên)
         self.camera_thread = None
@@ -310,8 +313,10 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             return
         self.camera_thread = CameraThread(self)
         self.camera_thread.frame_signal.connect(self._on_frame)
+        self.camera_thread.intrinsics_signal.connect(self._on_intrinsics)
         self.camera_thread.start()
         self.log("Camera started.")
+
 
     def stop_camera(self):
         if self.camera_thread and self.camera_thread.isRunning():
@@ -319,58 +324,112 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.camera_thread.wait()
             self.log("Camera stopped.")
 
-    def _on_frame(self, bgr: np.ndarray):
-        """Nhận frame BGR từ CameraThread. Nếu đã load YOLO -> chạy detect rồi hiển thị."""
-        if bgr is None or bgr.size == 0 or not hasattr(self.ui, "imgOut"):
-            return
+    def _on_frame(self, bgr):
+        try:
+            vis_bgr = bgr.copy()
 
-        vis_bgr = bgr
-        count_box = None  # sẽ cập nhật cho UI
+            # ===== Nếu đã load YOLO thì detect trước =====
+            if hasattr(self, "yolo_model") and self.yolo_model is not None:
+                results = self.yolo_model.predict(vis_bgr, iou=0.5, conf=0.25, verbose=False)
+                counts = {}
+                for r in results:
+                    for box in r.boxes:
+                        cls_id = int(box.cls)
+                        cls_name = self.yolo_model.names[cls_id]
+                        counts[cls_name] = counts.get(cls_name, 0) + 1
 
-        if self.yolo_model is not None:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        cv2.rectangle(vis_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(vis_bgr, f"{cls_name} {box.conf[0]:.2f}",
+                                    (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                    (0, 255, 0), 1)
+
+                # Cập nhật số lượng vào packageAvailable
+                pkg_text = "\n".join(f"{k}: {v}" for k, v in counts.items())
+                self._set_text_safe("packageAvailable", pkg_text)
+
+            # ===== Phát hiện ArUco 4x4_50 =====
             try:
-                rgb = bgr[:, :, ::-1]
-                results = self.yolo_model.predict(rgb, verbose=False, imgsz=640, conf=0.65, iou=0.01, device=0)
-                if results:
-                    r = results[0]
-                    # --- ĐẾM SỐ LƯỢNG THEO CLASS ---
-                    names = getattr(r, "names", None) or getattr(self.yolo_model, "names", {})
-                    cls = None
-                    if hasattr(r, "boxes") and hasattr(r.boxes, "cls") and r.boxes.cls is not None:
-                        cls = r.boxes.cls.detach().cpu().numpy().astype(int)
-                    counts = {}
-                    if cls is not None and len(cls) > 0:
-                        for cid in cls:
-                            name = names[cid] if isinstance(names, (list, tuple)) else names.get(int(cid), str(cid))
-                            counts[name] = counts.get(name, 0) + 1
-                    self.detect_counts = counts
-                    count_box = counts.get("box", 0)
-                    # vẫn trong _on_frame, sau khi tính count_box
-                    if count_box is not None and hasattr(self.ui, "packageAvailable"):
-                        w = self.ui.packageAvailable
-                        text = str(count_box)
-                        if hasattr(w, "setPlainText"):
-                            w.setPlainText(text)
-                        elif hasattr(w, "setText"):
-                            w.setText(text)
+                dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+                parameters = cv2.aruco.DetectorParameters()
+                detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-                    # vẽ ảnh đã detect
-                    if hasattr(r, "plot"):
-                        vis_bgr = r.plot()  # BGR uint8
+                corners, ids, rejected = detector.detectMarkers(bgr)
+                if ids is not None and len(ids) > 0:
+                    idx = np.random.randint(len(ids))  # chọn ngẫu nhiên 1 marker
+                    cv2.aruco.drawDetectedMarkers(vis_bgr, corners, ids)
 
+                    # Góc 2D trên ảnh
+                    pts = corners[idx][0]
+                    tl, tr = pts[0], pts[1]
+                    v = tr - tl
+                    yaw_img_deg = math.degrees(math.atan2(v[1], v[0]))
+                    self._set_text_safe("pickUpYaw", f"{yaw_img_deg:.2f}")
+
+                    if hasattr(self, "cam_K") and hasattr(self, "cam_dist") and hasattr(self, "aruco_size_m"):
+                        if self.cam_K is not None and self.aruco_size_m is not None:
+                            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                                corners, self.aruco_size_m, self.cam_K, self.cam_dist
+                            )
+                            rvec, tvec = rvecs[idx].reshape(3, 1), tvecs[idx].reshape(3, 1)
+
+                            cv2.aruco.drawAxis(vis_bgr, self.cam_K, self.cam_dist, rvec, tvec, self.aruco_size_m * 0.5)
+
+                            X_mm = float(tvec[0] * 1000.0)
+                            Y_mm = float(tvec[1] * 1000.0)
+                            Z_mm = float(tvec[2] * 1000.0)
+
+                            self._set_text_safe("pickUpX", f"{X_mm:.1f}")
+                            self._set_text_safe("pickUpY", f"{Y_mm:.1f}")
+                            self._set_text_safe("pickUpZ", f"{Z_mm:.1f}")
+                    else:
+                        # Nếu chưa có intrinsics thì fill toạ độ ảnh
+                        cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
+                        self._set_text_safe("pickUpX", f"{cx:.1f}")
+                        self._set_text_safe("pickUpY", f"{cy:.1f}")
+                        self._set_text_safe("pickUpZ", "")
             except Exception as e:
-                self.log(f"YOLO infer error: {e}")
-                vis_bgr = bgr
+                self.log(f"ArUco error: {e}")
 
-        # Convert BGR -> RGB -> QImage -> QPixmap và show
+            # ===== Đưa ảnh ra imgOut =====
+            rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+            pix = QPixmap.fromImage(qimg)
+            target_w = self.ui.imgOut.width()
+            target_h = self.ui.imgOut.height()
+            self.ui.imgOut.setPixmap(pix.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        except Exception as e:
+            self.log(f"_on_frame error: {e}")
+
+
+            # ===== YOLO (giữ như bạn đang có) =====
+            if self.yolo_model is not None:
+                try:
+                    rgb = vis_bgr[:, :, ::-1]
+                    results = self.yolo_model.predict(rgb, verbose=False)
+                    if results and hasattr(results[0], "plot"):
+                        vis_bgr = results[0].plot()
+                except Exception as e:
+                    self.log(f"YOLO infer error: {e}")
+                    vis_bgr = vis_bgr
+
+        # ===== Show lên imgOut =====
         rgb = vis_bgr[:, :, ::-1].copy()
         h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        qimg = QImage(rgb.data, w, h, ch*w, QImage.Format_RGB888)
         pix = QPixmap.fromImage(qimg).scaled(self.ui.imgOut.width(),
                                             self.ui.imgOut.height(),
                                             Qt.KeepAspectRatio,
                                             Qt.SmoothTransformation)
         self.ui.imgOut.setPixmap(pix)
+
+    def _set_text_safe(self, widget_name, text):
+        if not hasattr(self.ui, widget_name): return
+        w = getattr(self.ui, widget_name)
+        if hasattr(w, "setPlainText"): w.setPlainText(str(text))
+        elif hasattr(w, "setText"):    w.setText(str(text))
 
     # ===== xArm =====
     def connect_hardware(self):
@@ -498,6 +557,11 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         except Exception as e:
             self.log(f"Lỗi load YOLO: {e}")
             return False
+
+    def _on_intrinsics(self, data: dict):
+        self.cam_K = data.get("K")
+        self.cam_dist = data.get("dist")
+        self.log(f"Got intrinsics: fx={self.cam_K[0,0]:.1f}, fy={self.cam_K[1,1]:.1f}")
 
     # ===== lifecycle =====
     def closeEvent(self, event):

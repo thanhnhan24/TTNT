@@ -36,26 +36,47 @@ class CameraThread(QThread):
             cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
             profile = self._pipeline.start(cfg)
 
-            # === LẤY INTRINSICS MÀU, EMIT 1 LẦN ===
+            # Emit intrinsics một lần
             try:
                 cprof = rs.video_stream_profile(profile.get_stream(rs.stream.color))
                 intr = cprof.get_intrinsics()
-                # K, dist theo OpenCV
                 K = np.array([[intr.fx, 0, intr.ppx],
-                              [0, intr.fy, intr.ppy],
-                              [0,       0,        1]], dtype=np.float32)
+                            [0, intr.fy, intr.ppy],
+                            [0,       0,        1]], dtype=np.float32)
                 dist = np.array(intr.coeffs, dtype=np.float32)
                 self.intrinsics_signal.emit({"K": K, "dist": dist})
             except Exception as e:
                 self._log(f"[CameraThread] intrinsics error: {e}")
 
+            last_ok = time.time()
             while not self.isInterruptionRequested():
-                frames = self._pipeline.wait_for_frames(5000)
-                color = frames.get_color_frame()
-                if not color:
+                # Không block 5s – poll nhanh 10–15ms
+                frames = None
+                for _ in range(5):  # ~50–75ms
+                    fs = self._pipeline.poll_for_frames()
+                    if fs:
+                        frames = fs
+                        break
+                    self.msleep(15)
+
+                if frames:
+                    color = frames.get_color_frame()
+                    if color:
+                        bgr = np.asanyarray(color.get_data())
+                        self.frame_signal.emit(bgr)
+                        last_ok = time.time()
                     continue
-                bgr = np.asanyarray(color.get_data())
-                self.frame_signal.emit(bgr)
+
+                # Không có frame quá 2 giây -> restart pipeline
+                if time.time() - last_ok > 2.0:
+                    self._log("[CameraThread] no frames for 2s, restarting pipeline…")
+                    try:
+                        self._pipeline.stop()
+                    except Exception:
+                        pass
+                    self._pipeline = rs.pipeline()
+                    self._pipeline.start(cfg)
+                    last_ok = time.time()
 
         except Exception as e:
             self._log(f"[CameraThread] {e}")
@@ -67,6 +88,77 @@ class CameraThread(QThread):
                 self._log(f"[CameraThread] stop error: {e}")
             self._pipeline = None
 
+# =========================
+# ArUco detection thread
+# =========================
+class ArucoDetectThread(QThread):
+    # dx, dy, cx, cy, t (timestamp), ids (numpy or None)
+    result_sig = Signal(float, float, float, float, float, object)
+
+    def __init__(self, img_w=640, img_h=480, parent=None):
+        super().__init__(parent)
+        self.img_w = img_w
+        self.img_h = img_h
+        self.cx0 = img_w * 0.5
+        self.cy0 = img_h * 0.5
+        self.q = queue.Queue(maxsize=1)
+        self._running = True
+
+        # OpenCV ArUco detector (4x4_50)
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        params = cv2.aruco.DetectorParameters()
+        self.detector = cv2.aruco.ArucoDetector(dictionary, params)
+
+    def submit(self, bgr):
+        # Không block UI: nếu queue đầy thì thay frame cũ bằng frame mới
+        try:
+            if self.q.full():
+                _ = self.q.get_nowait()
+            self.q.put_nowait(bgr)
+        except queue.Full:
+            pass
+        except queue.Empty:
+            pass
+
+    def run(self):
+        while self._running:
+            try:
+                frame = self.q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                corners, ids, _ = self.detector.detectMarkers(frame)
+                if ids is None or len(ids) == 0:
+                    continue
+
+                # Chọn marker gần tâm ảnh nhất
+                best_i = None
+                best_d2 = 1e18
+                best_c = None
+                for i in range(len(ids)):
+                    pts = corners[i][0]
+                    cx = float(pts[:, 0].mean())
+                    cy = float(pts[:, 1].mean())
+                    d2 = (cx - self.cx0) ** 2 + (cy - self.cy0) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_i = i
+                        best_c = (cx, cy)
+
+                if best_i is None or best_c is None:
+                    continue
+
+                cx, cy = best_c
+                dx = cx - self.cx0
+                dy = cy - self.cy0
+                self.result_sig.emit(float(dx), float(dy), float(cx), float(cy), time.time(), ids)
+            except Exception:
+                # nuốt lỗi để thread không chết
+                pass
+
+    def stop(self):
+        self._running = False
+        self.wait()
 
 # =========================
 # xArm connect worker (không block UI)
@@ -258,6 +350,12 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
         self.robot_mon.start()
         self.camera_thread = None
         self._last_aruco = None
+                # --- ArUco thread ---
+        self.aruco_thread = ArucoDetectThread(img_w=640, img_h=480, parent=self)
+        self.aruco_thread.result_sig.connect(self._on_aruco_result)
+        self.aruco_thread.start()
+        self._aruco_last = None  # lưu (dx, dy, cx, cy, t)
+
 
 
         # Kết nối xArm
@@ -626,7 +724,7 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             self.log("Không thấy ArUco gần đây. Đưa tag vào khung hình."); return
 
         # --- tham số điều khiển ---
-        hover_z   = 220.0      # cao độ căn XY (mm) – chỉnh theo thực tế
+        hover_z   = 320.0      # cao độ căn XY (mm) – chỉnh theo thực tế
         px_th     = 3.0        # ngưỡng lỗi ảnh (px) để coi là trùng
         kP        = 0.7        # hệ số tỉ lệ (giảm nếu rung)
         max_step  = 15.0       # mm: giới hạn mỗi bước
@@ -678,8 +776,8 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
             dx_mm = float(np.clip(dx_mm, -max_step, max_step)) * sign_x
             dy_mm = float(np.clip(dy_mm, -max_step, max_step)) * sign_y
 
-            target_x = cur_x + dx_mm
-            target_y = cur_y + dy_mm
+            target_x = cur_x - dx_mm
+            target_y = cur_y - dy_mm
 
             self.log(f"[Calib] it={it} err=({ex:.1f}px,{ey:.1f}px) step=({dx_mm:.1f},{dy_mm:.1f}) → ({target_x:.1f},{target_y:.1f})")
             self.robot_ctrl.move(target_x, target_y, hover_z, cur_yaw)
@@ -692,6 +790,19 @@ class MainApp(QMainWindow, UI.Ui_MainWindow):
 
         # (tuỳ chọn) sau khi căn xong thì hạ xuống Z=175
         # self.robot_ctrl.move(cur_x, cur_y, 175.0, cur_yaw)
+
+    def _on_aruco_result(self, dx, dy, cx, cy, t, ids):
+        # Lưu để overlay trong _on_frame
+        self._aruco_last = {"dx": dx, "dy": dy, "cx": cx, "cy": cy, "t": t}
+
+        # Nếu UI có ô hiển thị thì cập nhật; nếu không thì log
+        updated = False
+        if hasattr(self.ui, "arucoDX"):
+            self.ui.arucoDX.setPlainText(f"{dx:.1f} px"); updated = True
+        if hasattr(self.ui, "arucoDY"):
+            self.ui.arucoDY.setPlainText(f"{dy:.1f} px"); updated = True
+        if not updated:
+            self.log(f"ArUco offset: dx={dx:.1f}px, dy={dy:.1f}px (cx={cx:.1f}, cy={cy:.1f})")
 
 
     # ===== lifecycle =====

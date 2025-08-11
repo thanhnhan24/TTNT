@@ -211,10 +211,10 @@ Robot và Trí tuệ nhân tạo</string>
    <widget class="QListWidget" name="logView">
     <property name="geometry">
      <rect>
-      <x>20</x>
-      <y>250</y>
-      <width>641</width>
-      <height>221</height>
+      <x>40</x>
+      <y>290</y>
+      <width>621</width>
+      <height>191</height>
      </rect>
     </property>
    </widget>
@@ -224,7 +224,7 @@ Robot và Trí tuệ nhân tạo</string>
       <x>20</x>
       <y>480</y>
       <width>641</width>
-      <height>351</height>
+      <height>361</height>
      </rect>
     </property>
     <property name="font">
@@ -347,7 +347,7 @@ Robot và Trí tuệ nhân tạo</string>
      <property name="geometry">
       <rect>
        <x>260</x>
-       <y>260</y>
+       <y>290</y>
        <width>361</width>
        <height>61</height>
       </rect>
@@ -466,9 +466,9 @@ Robot và Trí tuệ nhân tạo</string>
      <property name="geometry">
       <rect>
        <x>260</x>
-       <y>190</y>
+       <y>230</y>
        <width>361</width>
-       <height>61</height>
+       <height>51</height>
       </rect>
      </property>
      <property name="orientation">
@@ -562,6 +562,24 @@ Robot và Trí tuệ nhân tạo</string>
         <enum>Qt::ScrollBarAlwaysOff</enum>
        </property>
       </widget>
+     </widget>
+    </widget>
+    <widget class="QSplitter" name="splitter_18">
+     <property name="geometry">
+      <rect>
+       <x>260</x>
+       <y>180</y>
+       <width>361</width>
+       <height>41</height>
+      </rect>
+     </property>
+     <property name="orientation">
+      <enum>Qt::Horizontal</enum>
+     </property>
+     <widget class="QPushButton" name="calibButton">
+      <property name="text">
+       <string>Căn giữa</string>
+      </property>
      </widget>
     </widget>
    </widget>
@@ -911,6 +929,100 @@ Robot và Trí tuệ nhân tạo</string>
     <property name="orientation">
      <enum>Qt::Vertical</enum>
     </property>
+   </widget>
+   <widget class="QGroupBox" name="groupBox_8">
+    <property name="geometry">
+     <rect>
+      <x>680</x>
+      <y>770</y>
+      <width>422</width>
+      <height>71</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <pointsize>10</pointsize>
+     </font>
+    </property>
+    <property name="title">
+     <string>Tọa độ hiện tại</string>
+    </property>
+    <widget class="QSplitter" name="splitter_17">
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>30</y>
+       <width>401</width>
+       <height>31</height>
+      </rect>
+     </property>
+     <property name="orientation">
+      <enum>Qt::Horizontal</enum>
+     </property>
+     <widget class="QLabel" name="label_31">
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>X:</string>
+      </property>
+     </widget>
+     <widget class="QPlainTextEdit" name="xarm_X">
+      <property name="verticalScrollBarPolicy">
+       <enum>Qt::ScrollBarAlwaysOff</enum>
+      </property>
+     </widget>
+     <widget class="QLabel" name="label_32">
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Y:</string>
+      </property>
+     </widget>
+     <widget class="QPlainTextEdit" name="xarm_Y">
+      <property name="verticalScrollBarPolicy">
+       <enum>Qt::ScrollBarAlwaysOff</enum>
+      </property>
+     </widget>
+     <widget class="QLabel" name="label_33">
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Z:</string>
+      </property>
+     </widget>
+     <widget class="QPlainTextEdit" name="xarm_Z">
+      <property name="verticalScrollBarPolicy">
+       <enum>Qt::ScrollBarAlwaysOff</enum>
+      </property>
+     </widget>
+     <widget class="QLabel" name="label_34">
+      <property name="font">
+       <font>
+        <pointsize>12</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Yaw:</string>
+      </property>
+     </widget>
+     <widget class="QPlainTextEdit" name="xarm_theta">
+      <property name="verticalScrollBarPolicy">
+       <enum>Qt::ScrollBarAlwaysOff</enum>
+      </property>
+      <property name="plainText">
+       <string>0</string>
+      </property>
+     </widget>
+    </widget>
    </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
